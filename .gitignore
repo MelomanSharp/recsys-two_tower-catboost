@@ -1,0 +1,31 @@
+# Данные
+data/
+*.csv
+*.parquet
+*.pickle
+*.h5
+
+# Модели
+models/
+*.pt
+*.pth
+*.ckpt
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Виртуальное окружение
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Секреты
+.env
+.env.*
