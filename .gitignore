@@ -1,12 +1,12 @@
 # Данные
-data/
+/data/
 *.csv
 *.parquet
 *.pickle
 *.h5
 
 # Модели
-models/
+/models/
 *.pt
 *.pth
 *.ckpt
