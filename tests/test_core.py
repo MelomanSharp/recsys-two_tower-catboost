@@ -1,9 +1,13 @@
+import os
 import pytest
 import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
+from src.config import Config
 from src.data.features import FeatureEngineer
+from src.pipeline.recommendation_pipeline import RecSysPipeline
 from src.ranking.reranker import MaximalMarginalRelevance
+from src.retrieval.indexer import TwoTowerIndexer
 from src.serving.app import app
 
 # 1. test of logics (PSI)
@@ -46,3 +50,23 @@ def test_api_health():
     response = client.get("/health")
     assert response.status_code == 200
     assert "status" in response.json()
+
+
+def test_two_tower_artifacts_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(Config, "MODEL_DIR", str(tmp_path))
+    pipe = RecSysPipeline(use_mlflow=False)
+    pipe.user_encoder.fit(["u1", "u2"])
+    pipe.item_encoder.fit(["i1", "i2"])
+    pipe.indexer = TwoTowerIndexer(3, 3, pipe.user_encoder, pipe.item_encoder)
+    pipe.indexer.faiss_index.add_items(pipe.item_encoder.classes_, np.random.rand(len(pipe.item_encoder.classes_), Config.EMBEDDING_DIM).astype("float32"))
+    pipe._save_artifacts()
+
+    assert os.path.exists(os.path.join(str(tmp_path), "two_tower_model.pt"))
+    assert os.path.exists(os.path.join(str(tmp_path), "two_tower_faiss.index"))
+
+    restored = RecSysPipeline(use_mlflow=False)
+    restored.user_encoder.fit(["u1", "u2"])
+    restored.item_encoder.fit(["i1", "i2"])
+    assert restored.load_artifacts() is True
+    assert restored.indexer is not None
+    assert restored.searcher is not None

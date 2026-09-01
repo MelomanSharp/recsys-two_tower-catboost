@@ -89,26 +89,35 @@ class MLRanker:
         return self._attach_features(positives)
 
     def _sample_negatives(self, positive_df: pd.DataFrame, n_neg: int = 4) -> pd.DataFrame:
-        """Samples random items the user has NOT purchased."""
+        """Vectorized negative sampling for speed (replaces slow iterrows)."""
+        if positive_df.empty:
+            return pd.DataFrame(columns=["customer_id", "article_id", "target"])
+            
         all_items = self.item_features["article_id"].values
-        neg_rows = []
-        for _, row in positive_df.iterrows():
-            user_id = row["customer_id"]
-            bought = set(
-                self.user_features.merge(positive_df[positive_df["customer_id"] == user_id],
-                                         on="customer_id", how="inner")["article_id"].tolist()
-            ) if user_id in self.user_features["customer_id"].values else set()
-
-            candidates = [i for i in all_items if i not in bought]
-            if not candidates:
-                continue
-            sampled = np.random.choice(candidates, size=min(n_neg, len(candidates)), replace=False)
-            for item_id in sampled:
-                neg_rows.append({"customer_id": user_id, "article_id": item_id, "target": 0})
-        negatives = pd.DataFrame(neg_rows)
-        if negatives.empty:
-            return negatives
+        
+        user_pos_counts = positive_df.groupby("customer_id").size()
+        
+        neg_dfs = []
+        for user_id, count in user_pos_counts.items():
+            num_samples = n_neg * count
+            sampled_items = np.random.choice(all_items, size=num_samples, replace=True)
+            
+            neg_dfs.append(pd.DataFrame({
+                "customer_id": np.full(num_samples, user_id),
+                "article_id": sampled_items,
+                "target": 0
+            }))
+            
+        negatives = pd.concat(neg_dfs, ignore_index=True)
+        
+        positives_flag = positive_df[["customer_id", "article_id"]].drop_duplicates()
+        positives_flag["is_positive"] = True
+        
+        merged = negatives.merge(positives_flag, on=["customer_id", "article_id"], how="left")
+        negatives = merged[merged["is_positive"].isna()].drop(columns=["is_positive"])
+        
         return self._attach_features(negatives[["customer_id", "article_id"]])
+    
 
     def _attach_features(self, pairs: pd.DataFrame) -> pd.DataFrame:
         u = self.user_features

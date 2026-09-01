@@ -1,6 +1,9 @@
+import os
+import joblib
+import faiss
 import numpy as np
 import pandas as pd
-import os
+import torch
 from src.retrieval.indexer import TwoTowerIndexer
 from src.retrieval.searcher import CandidateSearcher
 from src.ranking.ranker import MLRanker
@@ -69,10 +72,29 @@ class RecSysPipeline:
         num_items = len(self.item_encoder.classes_) + 1
 
         # --- Retrieval training ---
-        print("🚀 Training Two-Tower Retrieval Model...")
-        self.indexer = TwoTowerIndexer(num_users, num_items, self.user_encoder, self.item_encoder)
-        self.indexer.train(trans)
-        item_embeddings = self.indexer.build_item_index()
+        model_path = os.path.join(Config.MODEL_DIR, "two_tower_model.pt")
+        faiss_path = os.path.join(Config.MODEL_DIR, "two_tower_faiss.index")
+        encoder_user_path = os.path.join(Config.MODEL_DIR, "user_encoder.joblib")
+        encoder_item_path = os.path.join(Config.MODEL_DIR, "item_encoder.joblib")
+
+        if os.path.exists(model_path) and os.path.exists(faiss_path):
+            print("✅ Found cached Two-Tower artifacts. Loading saved retrieval model...")
+            if not self.load_artifacts():
+                print("⚠️ Saved Two-Tower artifacts are incomplete. Rebuilding retrieval model...")
+                self.indexer = TwoTowerIndexer(num_users, num_items, self.user_encoder, self.item_encoder)
+                self.indexer.train(trans)
+                item_embeddings = self.indexer.build_item_index()
+            else:
+                self.indexer.model.eval()
+                with torch.no_grad():
+                    all_item_ids = torch.arange(len(self.item_encoder.classes_) + 1, device=self.indexer.device)
+                    item_embeddings = self.indexer.model.item_tower(all_item_ids).cpu().numpy()[1:]
+        else:
+            print("🚀 Training Two-Tower Retrieval Model...")
+            self.indexer = TwoTowerIndexer(num_users, num_items, self.user_encoder, self.item_encoder)
+            self.indexer.train(trans)
+            item_embeddings = self.indexer.build_item_index()
+            self._save_artifacts()
 
         if self.use_mlflow:
             mlflow.log_param("num_users", num_users)
@@ -104,11 +126,52 @@ class RecSysPipeline:
 
     def _save_artifacts(self):
         os.makedirs(Config.MODEL_DIR, exist_ok=True)
+
+        if self.indexer is not None and self.indexer.model is not None:
+            torch.save(
+                self.indexer.model.state_dict(),
+                os.path.join(Config.MODEL_DIR, "two_tower_model.pt")
+            )
+            faiss.write_index(
+                self.indexer.faiss_index.index,
+                os.path.join(Config.MODEL_DIR, "two_tower_faiss.index")
+            )
+            joblib.dump(self.user_encoder, os.path.join(Config.MODEL_DIR, "user_encoder.joblib"))
+            joblib.dump(self.item_encoder, os.path.join(Config.MODEL_DIR, "item_encoder.joblib"))
+
         if self.ranker and self.ranker.is_trained:
             self.ranker.ranker.model.save_model(
                 os.path.join(Config.MODEL_DIR, "catboost_ranker.cbm")
             )
         print(f"💾 Model artifacts saved to {Config.MODEL_DIR}/")
+
+    def _save_aritifcats(self):
+        self._save_artifacts()
+
+    def load_artifacts(self):
+        model_path = os.path.join(Config.MODEL_DIR, "two_tower_model.pt")
+        faiss_path = os.path.join(Config.MODEL_DIR, "two_tower_faiss.index")
+        user_encoder_path = os.path.join(Config.MODEL_DIR, "user_encoder.joblib")
+        item_encoder_path = os.path.join(Config.MODEL_DIR, "item_encoder.joblib")
+
+        if not os.path.exists(model_path) or not os.path.exists(faiss_path):
+            return False
+
+        if os.path.exists(user_encoder_path):
+            self.user_encoder = joblib.load(user_encoder_path)
+        if os.path.exists(item_encoder_path):
+            self.item_encoder = joblib.load(item_encoder_path)
+
+        num_users = len(self.user_encoder.classes_) + 1
+        num_items = len(self.item_encoder.classes_) + 1
+        self.indexer = TwoTowerIndexer(num_users, num_items, self.user_encoder, self.item_encoder)
+        self.indexer.model.load_state_dict(torch.load(model_path, map_location=self.indexer.device))
+        self.indexer.faiss_index.index = faiss.read_index(faiss_path)
+        self.searcher = CandidateSearcher(self.indexer.faiss_index, self.user_encoder, self.item_encoder)
+        return True
+
+    def load_artificats(self):
+        return self.load_artifacts()
 
     def generate(self, customer_id: str, top_k: int = 10):
         # 1. Retrieval
