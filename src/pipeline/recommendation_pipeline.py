@@ -106,9 +106,12 @@ class RecSysPipeline:
 
         print("⚖️ Training Ranking Model (CatBoost YetiRank)...")
         self.ranker = MLRanker(user_feat, item_feat)
-        ranker_metrics = self.ranker.train(transactions=trans)
+        
+        # Control memory use: train on 20% of users and use two negative samples.
+        ranker_metrics = self.ranker.train(transactions=trans, sample_frac=0.2, n_neg=2)
 
         if self.use_mlflow:
+            mlflow.log_artifacts(Config.MODEL_DIR, artifact_path="models")
             mlflow.log_metrics(ranker_metrics)
 
         print("🎨 Initializing Postprocessor...")
@@ -117,6 +120,15 @@ class RecSysPipeline:
 
         # Persist artifacts locally
         self._save_artifacts()
+
+        try:
+                mlflow.register_model(
+                    model_uri=f"runs:/{mlflow.active_run().info.run_id}/models",
+                    name="H&M_Hybrid_RecSys"
+                )
+                print("✅ Model registered in MLflow Registry.")
+        except Exception as e:
+                print(f"⚠️ MLflow registration failed: {e}")
 
         if self.use_mlflow:
             mlflow.end_run()

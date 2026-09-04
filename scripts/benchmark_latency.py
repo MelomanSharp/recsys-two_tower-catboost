@@ -5,16 +5,20 @@ import pandas as pd
 from src.pipeline.recommendation_pipeline import RecSysPipeline
 
 def run_benchmark(num_requests=100):
-    print("?? Initializing pipeline for benchmark...")
+    print("🔧 Initializing pipeline for benchmark...")
     pipeline = RecSysPipeline(use_mlflow=False)
-    # pipeline.train() # Uncomment if the model stil doesen't exist
     
-    # We take random users
+    # Load saved artifacts (encoders, FAISS index, and model weights).
+    if not pipeline.load_artifacts():
+        print("⚠️ Model artifacts not found. Starting training...")
+        pipeline.train()
+    
+    # user_encoder now has a classes_ attribute.
     users = pipeline.user_encoder.classes_
     sample_users = np.random.choice(users, size=min(num_requests, len(users)), replace=False)
     
     latencies = []
-    print(f"?? Running {len(sample_users)} inference requests...")
+    print(f"🚀 Running {len(sample_users)} inference requests...")
     
     for uid in sample_users:
         start = time.perf_counter()

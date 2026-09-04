@@ -16,7 +16,7 @@ class RecommendationResponse(BaseModel):
     recommendations: list
     source: str
 
-# Глобальная ссылка на пайплайн, инжектится при старте приложения
+# Global pipeline reference injected during application startup.
 rec_pipeline = None
 
 def set_pipeline(pipeline):
@@ -43,7 +43,7 @@ def get_recommendations(request: RecommendationRequest):
             customer_id=request.customer_id, recommendations=recommendations, source="ml_pipeline"
         )
     except Exception as e:
-        # 3. Hard Fallback на популярные товары
+        # 3. Hard fallback to popular items.
         fallback = cache.get("global_popular_items") or ["fallback_item_1", "fallback_item_2"]
         return RecommendationResponse(
             customer_id=request.customer_id, recommendations=fallback[:request.top_k], source="fallback"

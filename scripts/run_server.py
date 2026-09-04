@@ -6,8 +6,8 @@ def main():
     print("⚙️ Initializing Recommendation Pipeline...")
     pipeline = RecSysPipeline()
     
-    # Для быстрого старта API без долгого обучения можно закомментировать .train()
-    # В production-среде модели должны загружаться из S3/MLflow, а не обучаться при старте поды
+    # To start the API quickly, leave training disabled.
+    # In production, load models from S3 or MLflow instead of training at pod startup.
     # pipeline.train() 
     
     print("🚀 Starting FastAPI server...")

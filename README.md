@@ -1,498 +1,184 @@
 # Production Recommendation System: H&M Personalized Fashion Recommendations
 
-Production-oriented рекомендательная система для e-commerce, построенная на данных соревнования Kaggle **H&M Personalized Fashion Recommendations**.
+An end-to-end recommendation system for the Kaggle **H&M Personalized Fashion Recommendations** dataset. The current production path combines Two-Tower retrieval with CatBoost YetiRank re-ranking and exposes recommendations through a FastAPI service.
 
-Проект исследует не только качество рекомендательных моделей, но и вопрос их практической эксплуатации: **насколько усложнение ML-архитектуры оправдано с точки зрения качества, вычислительных затрат, latency и устойчивости модели к изменению данных в production.**
+> **Status:** Two-Tower + CatBoost pipeline runs end to end. Initial ablation results are recorded; comparisons with independent baselines are still pending.
 
-> **Статус:** 🚧 In Progress
-> Архитектура и эксперименты находятся в разработке. Данный README описывает цели, гипотезы и план проекта.
+## Overview
 
----
-
-## 🎯 Цель проекта
-
-В реальном e-commerce рекомендательная система должна решать не только задачу построения точных рекомендаций.
-
-Усложнение модели обычно приводит к росту вычислительных затрат, latency, сложности инфраструктуры и стоимости поддержки. При этом поведение пользователей, ассортимент и популярность товаров постоянно меняются, поэтому даже хорошо обученная модель может постепенно терять эффективность.
-
-Основная цель проекта:
-
-> **Исследовать, какой подход к персонализации обеспечивает оптимальный баланс между качеством рекомендаций, computational cost, latency и сложностью эксплуатации, а также определить, когда деградация модели становится достаточной причиной для retraining или замены модели.**
-
-Таким образом, проект рассматривает рекомендательную систему как **production ML system**, а не как отдельный обученный алгоритм.
-
----
-
-## 🏪 Бизнес-контекст
-
-Представим e-commerce платформу с большим каталогом товаров и историей взаимодействий пользователей.
-
-Для каждого пользователя система должна сформировать персональную подборку товаров, которая потенциально увеличивает:
-
-* вероятность взаимодействия с рекомендованным товаром;
-* add-to-cart rate;
-* conversion rate;
-* revenue per session/user.
-
-При этом система должна работать с приемлемой latency и стоимостью инфраструктуры.
-
-Кроме того, рекомендации должны оставаться актуальными при изменении:
-
-* пользовательских предпочтений;
-* ассортимента;
-* популярности товаров;
-* сезонности;
-* распределения трафика.
-
----
-
-## 🔬 Основные исследовательские вопросы
-
-### 1. Даёт ли более сложная архитектура действительно лучшее качество?
-
-Будут сравнены несколько подходов:
+The system follows a two-stage architecture:
 
 ```text
-Popularity baseline
-        ↓
-Collaborative / interaction-based baseline
-        ↓
-Candidate Retrieval
-        ↓
-Retrieval + Ranking
+User history and catalog
+          |
+          v
+Feature engineering
+          |
+          v
+Two-Tower retrieval + FAISS       -> candidate items
+          |
+          v
+CatBoost YetiRank                 -> ranked recommendations
+          |
+          v
+FastAPI + Redis cache
 ```
 
-Для моделей будут исследоваться:
+This structure keeps the expensive ranking step focused on a limited candidate set while preserving a path to low-latency online serving.
 
-* Recall@K
-* Precision@K
-* NDCG@K
-* MAP@K
-* catalog coverage
-* diversity
+## Current results
 
-Главный вопрос:
+The latest recorded ablation results are in [reports/ablation_results.csv](reports/ablation_results.csv). They cover candidate-set size and embedding dimension. The columns are:
 
-> **Какой прирост качества даёт усложнение модели?**
+* `candidates`: number of retrieved candidates;
+* `emb_dim`: Two-Tower embedding dimension;
+* `ndcg`: recorded validation NDCG@12;
+* `latency`: recorded inference latency in milliseconds;
+* `cost`: relative cost index used by the experiment.
 
----
+Selected recorded configurations:
 
-### 2. Какова цена этого прироста?
+| Candidates | Embedding dimension | NDCG@12 | Latency (ms) | Cost index |
+|---:|---:|---:|---:|---:|
+| 32 | 32 | 0.7787 | 710.82 | 0.5248 |
+| 100 | 64 | 0.8478 | 1491.12 | 0.5550 |
+| 200 | 128 | 0.9692 | 2842.48 | 0.6100 |
+| 500 | 128 | 0.9900 | 4673.20 | 0.6550 |
 
-Для различных архитектур будут измеряться:
+The highest recorded NDCG in this grid is **0.9900** at 500 candidates and a 128-dimensional embedding. This is an internal ablation result, not evidence that the full system outperforms another recommender: popularity, collaborative-filtering, retrieval-only, and other baselines have not yet been evaluated on the same split and protocol.
 
-* inference latency;
-* throughput;
-* CPU / RAM / GPU utilization;
-* размер модели;
-* стоимость inference;
-* стоимость обучения;
-* стоимость обновления индекса;
-* время retraining.
-
-Таким образом, сравнение моделей будет проводиться не только по offline ML metrics.
-
-Условно:
-
-```text
-             Model quality
-                  ↑
-                  │
-                  │        ● Complex model
-                  │
-                  │   ● Two-stage
-                  │
-                  │ ● Baseline
-                  │
-                  └────────────────────→
-                     Computational cost
-```
-
-Цель состоит не в том, чтобы автоматически выбрать самую сложную модель, а в том, чтобы определить **Pareto-optimal trade-off между качеством и стоимостью**.
-
----
-
-## ⚡ Two-stage recommendation architecture
-
-Основная production-архитектура проекта предполагает разделение рекомендаций на два этапа.
-
-```text
-                    User
-                      │
-                      ↓
-             ┌─────────────────┐
-             │    Retrieval    │
-             │                 │
-             │  User embedding │
-             │       +         │
-             │ Item embeddings │
-             └────────┬────────┘
-                      │
-                 ~100-500 items
-                      │
-                      ↓
-             ┌─────────────────┐
-             │     Ranking     │
-             │                 │
-             │    CatBoost     │
-             │   / LightGBM    │
-             └────────┬────────┘
-                      │
-                      ↓
-                 Top-K items
-```
-
-Retrieval ограничивает множество кандидатов, которые необходимо рассматривать ranking-модели.
-
-Это позволяет исследовать компромисс:
-
-> **качество × latency × computational cost**
-
-и проверить, насколько двухэтапная архитектура оправдана по сравнению с более простыми подходами.
-
----
-
-## 🧠 Production ML / MLOps
-
-Отдельная часть проекта посвящена жизненному циклу модели после deployment.
-
-Модель может продолжать работать технически корректно, одновременно становясь менее полезной.
-
-Например:
-
-```text
-User behavior changes
-        ↓
-Feature distribution changes
-        ↓
-Candidate distribution changes
-        ↓
-Model performance decreases
-        ↓
-Business metrics decrease
-```
-
-Поэтому мониторинг будет разделён как минимум на несколько уровней.
-
-### Data drift
-
-Контроль изменения распределений входных данных.
-
-Возможные методы:
-
-* PSI;
-* KL divergence;
-* Jensen-Shannon divergence;
-* Wasserstein distance;
-* statistical hypothesis tests.
-
-### Prediction drift
-
-Контроль изменения распределения model scores и результатов ranking.
-
-### Model performance drift
-
-Контроль изменения offline performance на новых данных:
-
-* NDCG@K;
-* Recall@K;
-* MAP@K;
-* другие релевантные metrics.
-
-### Business-level drift
-
-По возможности будет исследоваться связь ML degradation с proxy business metrics:
-
-* CTR;
-* add-to-cart rate;
-* conversion-related metrics.
-
----
-
-## 🔄 Когда необходимо переобучать модель?
-
-Одна из ключевых задач проекта:
-
-> **Не считать любой обнаруженный data drift автоматическим основанием для retraining.**
-
-Например:
-
-```text
-Data drift detected
-        ↓
-Does model performance degrade?
-        │
-   ┌────┴────┐
-   │         │
-  No        Yes
-   │         │
-   ↓         ↓
-Keep      Evaluate
-model     severity
-             │
-             ↓
-       Retraining decision
-```
-
-Таким образом, система должна различать:
-
-**Statistical change**
-
-> Данные изменились, но модель по-прежнему работает хорошо.
-
-и
-
-**Meaningful model degradation**
-
-> Изменение данных сопровождается устойчивым ухудшением качества рекомендаций.
-
-Планируется исследовать различные стратегии принятия решения о retraining:
-
-```text
-Fixed schedule
-       vs
-Drift-triggered retraining
-       vs
-Performance-triggered retraining
-       vs
-Hybrid strategy
-```
-
-Это позволит оценить не только качество моделей, но и **стоимость их поддержания**.
-
----
-
-## 🏗️ Предварительная архитектура
-
-```text
-                    Raw Data
-                       │
-                       ↓
-                ┌─────────────┐
-                │     ETL     │
-                └──────┬──────┘
-                       │
-                       ↓
-              Feature Generation
-                       │
-             ┌─────────┴─────────┐
-             ↓                   ↓
-        User features       Item features
-             │                   │
-             └─────────┬─────────┘
-                       ↓
-                  Retrieval
-                       │
-                       ↓
-                Candidate Set
-                       │
-                       ↓
-                   Ranking
-                       │
-                       ↓
-                Recommendations
-                       │
-                       ↓
-                     API
-                       │
-                       ↓
-                   Clients
-                       │
-                       ↓
-                User Events
-                       │
-                       └─────────────┐
-                                     ↓
-                              Monitoring
-                                     │
-                       ┌─────────────┴─────────────┐
-                       ↓                           ↓
-                  Data Drift                Performance
-                       │                           │
-                       └─────────────┬─────────────┘
-                                     ↓
-                              Retraining Logic
-                                     │
-                                     ↓
-                               Model Registry
-                                     │
-                                     ↓
-                              New Model Version
-```
-
----
-
-## 🧪 Offline evaluation
-
-Для предотвращения temporal leakage данные будут разделяться с учётом временной структуры interactions.
-
-Основные эксперименты будут включать:
-
-1. Baseline evaluation.
-2. Retrieval evaluation.
-3. Ranking evaluation.
-4. End-to-end evaluation.
-5. Ablation studies.
-6. Latency / resource benchmarks.
-7. Drift simulation.
-8. Retraining strategy evaluation.
-
-Особое внимание будет уделено temporal validation, поскольку случайный train/test split плохо отражает production-сценарий для recommendation system.
-
----
-
-## 📊 Что будет считаться успешным результатом?
-
-Проект не ставит целью получить максимальный возможный score любой ценой.
-
-Успешным будет считаться решение, которое позволяет обоснованно ответить на следующие вопросы:
-
-### Quality
-
-Насколько улучшается качество рекомендаций относительно baseline?
-
-### Cost
-
-Сколько дополнительных вычислительных ресурсов требуется для этого улучшения?
-
-### Latency
-
-Как изменяется latency при увеличении сложности модели и количества кандидатов?
-
-### Scalability
-
-Как система ведёт себя при увеличении числа пользователей, товаров и запросов?
-
-### Robustness
-
-Как быстро деградирует качество при изменении распределения данных?
-
-### Maintenance
-
-Как часто необходимо переобучение и сколько ресурсов оно требует?
-
-### Decision policy
-
-Можно ли построить достаточно надёжное правило:
-
-> **"Текущую модель следует оставить" / "модель необходимо переобучить" / "текущую архитектуру следует заменить".**
-
----
-
-## 🛠️ Technology Stack
-
-### Data & ML
-
-* Python
-* Pandas
-* NumPy
-* Scikit-learn
-* CatBoost / LightGBM
-* PyTorch
-* FAISS
-
-### Data processing
-
-* ETL pipelines
-* Feature engineering
-* Temporal data splitting
-
-### MLOps
-
-* Experiment tracking
-* Model versioning
-* Data / model monitoring
-* Drift detection
-* Automated evaluation
-* Retraining pipeline
-
-### Serving
-
-* REST API
-* Caching
-* Batch / online inference
-
-### Infrastructure
-
-Будет определено в ходе разработки в зависимости от требований к production-like deployment.
-
----
-
-## 📁 Planned project structure
+## Repository layout
 
 ```text
 .
 ├── data/
-├── notebooks/
+│   ├── raw/                    # Kaggle CSV files
+│   └── processed/daily/        # ETL parquet outputs
+├── dags/                       # Airflow drift and evaluation DAG
+├── docker/                     # Application and Airflow images
+├── reports/                    # Experiment outputs
+├── scripts/
+│   ├── download_data.py
+│   ├── run_local_etl.py
+│   ├── train_and_benchmark.py
+│   ├── benchmark_latency.py
+│   ├── ablation_study.py
+│   └── retraining_simulation.py
 ├── src/
-│   ├── etl/
-│   ├── features/
-│   ├── retrieval/
-│   ├── ranking/
-│   ├── evaluation/
-│   ├── monitoring/
-│   └── serving/
-│
-├── pipelines/
-│   ├── training/
-│   ├── evaluation/
-│   └── retraining/
-│
-├── tests/
-├── configs/
-├── docker/
-├── models/
-├── monitoring/
-├── README.md
-└── requirements.txt
+│   ├── data/                   # Loading and feature engineering
+│   ├── models/                 # Two-Tower and CatBoost components
+│   ├── retrieval/              # FAISS indexing and search
+│   ├── ranking/                # Candidate ranking and postprocessing
+│   ├── evaluation/             # Recommendation metrics
+│   ├── monitoring/             # Drift and inference monitoring
+│   ├── pipeline/               # End-to-end orchestration
+│   └── serving/                # FastAPI, cache, and health checks
+└── tests/
 ```
 
----
+## Requirements
 
-## 🚧 Development Roadmap
+* Python 3.10+ is recommended.
+* The packages pinned in [requirments.txt](requirments.txt). The filename is kept for compatibility with the existing project.
+* Kaggle credentials configured for `kagglehub` when downloading the dataset.
+* Redis and PostgreSQL for the complete serving setup. The local training and evaluation scripts do not require the Docker services.
 
-* [ ] Data ingestion and ETL
-* [ ] Temporal train/validation/test split
-* [ ] Popularity baseline
-* [ ] Initial recommendation baseline
-* [ ] Retrieval model
-* [ ] Candidate generation benchmark
-* [ ] Ranking model
-* [ ] End-to-end evaluation
-* [ ] Latency and resource benchmarks
-* [ ] Caching layer
-* [ ] REST API
-* [ ] Data quality monitoring
-* [ ] Drift detection
-* [ ] Model performance monitoring
-* [ ] Model registry / versioning
-* [ ] Retraining pipeline
-* [ ] Retraining decision policy
-* [ ] Architecture and cost comparison
-* [ ] Production-like deployment
+## Quick start
 
----
+Create an environment and install dependencies:
 
-## 💡 Project thesis
+```bash
+python -m venv .venv
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+pip install -r requirments.txt
+```
 
-> **A recommendation model is not successful merely because it achieves a high offline metric.**
+Download the Kaggle data and build processed parquet files:
 
-A production recommendation system must provide a reasonable balance between:
+```bash
+python scripts/download_data.py
+python scripts/run_local_etl.py
+```
+
+Train the Two-Tower + CatBoost pipeline and run the latency benchmark:
+
+```bash
+python scripts/train_and_benchmark.py
+```
+
+Run the latency benchmark against saved artifacts, or train automatically when artifacts are missing:
+
+```bash
+python -m scripts.benchmark_latency
+```
+
+Generate the quality-latency-cost ablation plot:
+
+```bash
+python scripts/ablation_study.py
+```
+
+## Serving locally
+
+The API entry point is `scripts/run_server.py`. For the full local stack, start Redis, PostgreSQL, and the FastAPI container with:
+
+```bash
+docker compose up --build
+```
+
+The service listens on `http://localhost:8000`. The main endpoint is `POST /recommend`:
+
+```json
+{
+  "customer_id": "customer-id",
+  "top_k": 10
+}
+```
+
+Health checks are available at `GET /health`.
+
+## Evaluation and monitoring
+
+The repository includes:
+
+* NDCG@K and Recall@K evaluation for holdout interactions;
+* popularity, retrieval-only, and item-item collaborative-filtering baseline implementations;
+* latency benchmarking with p50, p95, and p99 measurements;
+* PSI-based drift detection for price and item trendiness;
+* an Airflow decision path for production-model evaluation and retraining triggers;
+* Redis caching and PostgreSQL inference logging.
+
+The next evaluation step is to run every baseline and the Two-Tower + CatBoost pipeline against the same temporal holdout, then report quality, latency, coverage, and resource usage in one comparison table. Until that experiment is complete, the ablation values above should be treated as configuration results rather than a model leaderboard.
+
+## Tests
+
+Run the test suite with:
+
+```bash
+pytest
+```
+
+The tests cover API fallback behavior, PSI calculations, diversification, and core retrieval behavior. Full pipeline tests require the project dependencies and the corresponding data or model artifacts.
+
+## Technology stack
+
+* Python, pandas, NumPy, scikit-learn
+* PyTorch for Two-Tower training
+* FAISS for vector retrieval
+* CatBoost for ranking
+* FastAPI and Uvicorn for serving
+* Redis for caching
+* PostgreSQL for inference logs
+* Airflow and MLflow for orchestration and experiment tracking
+* Docker Compose for local services
+
+## Project direction
+
+The project is intended to measure the complete operational trade-off, not only offline ranking quality:
 
 ```text
-                 ┌──────────────┐
-                 │    Quality   │
-                 └──────┬───────┘
-                        │
-      ┌─────────────────┼─────────────────┐
-      ↓                 ↓                 ↓
-   Latency             Cost            Robustness
-      │                 │                 │
-      └─────────────────┼─────────────────┘
-                        ↓
-                 Maintainability
-                        ↓
-                 Business Value
+quality <-> latency <-> infrastructure cost <-> robustness <-> maintenance
 ```
 
-The project therefore focuses on the **full lifecycle of a recommendation system**, from candidate generation and ranking to monitoring, evaluation and retraining decisions.
+Planned comparison work includes a shared temporal evaluation protocol, baseline benchmarking, candidate coverage and diversity metrics, resource measurements, and a retraining policy based on both drift and model performance.

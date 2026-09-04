@@ -27,13 +27,17 @@ class InferenceLogger:
             """)
             self.conn.commit()
 
-    def log_request(self, customer_id: str, recs: list, source: str, latency_ms: float):
+    def log_request(self, customer_id: str, recs: list, source: str, latency_ms: float, scores: list = None):
         if not self.conn: return
         try:
+            # Store the score distribution for prediction-drift monitoring.
+            scores_json = json.dumps(scores) if scores else "[]"
             with self.conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO inference_logs (customer_id, recommendations, source, latency_ms) VALUES (%s, %s, %s, %s)",
-                    (customer_id, json.dumps(recs), source, latency_ms)
+                    """INSERT INTO inference_logs 
+                       (customer_id, recommendations, source, latency_ms, scores_distribution) 
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (customer_id, json.dumps(recs), source, latency_ms, scores_json)
                 )
                 self.conn.commit()
         except Exception as e:

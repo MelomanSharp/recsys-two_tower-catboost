@@ -11,6 +11,9 @@ import os
 import pandas as pd
 import numpy as np
 
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 from src.data.loader import DataLoader
 from src.data.features import FeatureEngineer
@@ -61,12 +64,12 @@ def compute_drift_and_psi(**context):
 
     engineer = FeatureEngineer()
     
-    # 1. Price PSI (Порог 0.15, так как 0.25 недостижим и бесполезен)
+    # 1. Price PSI (0.15 is used because 0.25 is unreachable and not useful)
     psi_price = engineer.calculate_psi(ref["price"].values, tar["price"].values, num_bins=10)
     print(f"PSI[price] = {psi_price:.4f} (Threshold: 0.15)")
     context["ti"].xcom_push("psi_price", float(psi_price))
     
-    # 2. Popularity / Trendiness PSI (То, что РЕАЛЬНО дрейфует)
+    # 2. Popularity / trendiness PSI (the feature that actually drifts)
     ref_pop = ref.groupby("article_id").size()
     tar_pop = tar.groupby("article_id").size()
     common = ref_pop.index.intersection(tar_pop.index)
@@ -77,44 +80,42 @@ def compute_drift_and_psi(**context):
     print(f"PSI[item_trendiness] = {psi_trend:.4f} (Threshold: 0.20)")
     context["ti"].xcom_push("psi_trendiness", float(psi_trend))
 
-    # 3. Решение о ретрейнинге на основе выводов из EDA
-    # Ловим сезонность (цена > 0.15) или сдвиг ассортимента (тренды > 0.20)
+    # 3. Make a retraining decision based on EDA findings.
+    # Detect seasonality (price > 0.15) or a catalog shift (trendiness > 0.20).
     if psi_price > 0.15 or psi_trend > 0.20:
         return "trigger_retrain"
     
     return "no_action"
 
+
 def evaluate_offline_metrics(**context):
-    """Computes NDCG@K on a real recent holdout window."""
+    """Evaluate the production model rather than a baseline."""
+    from src.pipeline.recommendation_pipeline import RecSysPipeline
+    from src.evaluation.metrics import RecSysEvaluator
+    
     base_dir = os.path.join(os.path.dirname(__file__), "../data/processed/daily")
     trans = pd.read_parquet(os.path.join(base_dir, "transactions.parquet"))
     trans["t_dat"] = pd.to_datetime(trans["t_dat"])
+    holdout = trans[trans["t_dat"] >= (trans["t_dat"].max() - timedelta(days=TARGET_WINDOW_DAYS))]
 
-    holdout_start = trans["t_dat"].max() - timedelta(days=TARGET_WINDOW_DAYS)
-    holdout = trans[trans["t_dat"] >= holdout_start]
-
-    evaluator = RecSysEvaluator()
-    # For each user: top-N by popularity vs their actual next purchases
-    popularity = trans[trans["t_dat"] < holdout_start].groupby("article_id").size().sort_values(ascending=False)
-    top_pop_items = popularity.head(50).index.tolist()
+    pipeline = RecSysPipeline(use_mlflow=False)
+    if not pipeline.load_artifacts():
+        raise AirflowSkipException("No production model found.")
 
     sampled_users = holdout["customer_id"].unique()[:500]
-    ndcgs, recalls = [], []
-    for uid in sampled_users:
-        actual = holdout[holdout["customer_id"] == uid]["article_id"].tolist()
-        if not actual:
-            continue
-        ndcgs.append(evaluator.ndcg_at_k(actual, top_pop_items, k=12))
-        recalls.append(evaluator.recall_at_k(actual, top_pop_items, k=12))
+    ndcgs = [RecSysEvaluator.ndcg_at_k(
+                holdout[holdout["customer_id"] == uid]["article_id"].tolist(),
+                pipeline.generate(uid, top_k=12), k=12
+             ) for uid in sampled_users if not holdout[holdout["customer_id"] == uid].empty]
 
-    metrics = {
-        "ndcg@12": float(np.mean(ndcgs)) if ndcgs else 0.0,
-        "recall@12": float(np.mean(recalls)) if recalls else 0.0,
-        "evaluated_users": len(sampled_users),
-    }
-    print(f"Baseline popularity metrics: {metrics}")
-    context["ti"].xcom_push("offline_metrics", metrics)
-    return metrics
+    context["ti"].xcom_push("offline_metrics", {"ndcg@12": float(np.mean(ndcgs))})
+
+
+task_retrain = TriggerDagRunOperator(
+    task_id="trigger_retrain",
+    trigger_dag_id="retrain_recsys_model_dag", # A separate DAG must be created.
+    conf={"trigger_reason": "psi_drift_detected"}
+)
 
 def build_features(**context):
     """Generates and persists engineered user and item features."""

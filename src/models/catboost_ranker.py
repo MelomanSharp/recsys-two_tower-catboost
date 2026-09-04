@@ -1,4 +1,5 @@
-from catboost import CatBoostClassifier, Pool
+
+from catboost import CatBoostRanker as CBCatBoostRanker, Pool
 import pandas as pd
 import numpy as np
 
@@ -10,7 +11,12 @@ class CatBoostRanker:
         
     def train(self, X, y, group_ids, categorical_features):
         """Trains a CatBoost model optimized via the business-standard YetiRank framework."""
-        # Format dataset pool optimized explicitly for ranking structures
+        
+        # Cast categorical features to the category dtype before creating the Pool.
+        for col in categorical_features:
+            if col in X.columns:
+                X[col] = X[col].astype("category")
+                
         train_pool = Pool(
             data=X,
             label=y,
@@ -18,19 +24,31 @@ class CatBoostRanker:
             cat_features=categorical_features
         )
         
-        self.model = CatBoostClassifier(
+        # Use CatBoostRanker instead of a classifier. PFound:top=10 is supported
+        # here, while Recall:top=K is not a valid CatBoost ranking metric.
+        self.model = CBCatBoostRanker(
             iterations=self.iterations,
             learning_rate=self.lr,
             loss_function="YetiRank",
-            custom_metric=["NDCG:top=10", "Recall:top=100"],
+            custom_metric=["NDCG:top=10", "PFound:top=10"],
             random_seed=42,
-            verbose=100
+            verbose=100,
+            depth=6,
+            border_count=128,
         )
         
         self.model.fit(train_pool)
         return self.model
         
     def predict_scores(self, X, cat_features):
-        """Extracts raw likelihood prediction signals for multi-candidate re-ranking."""
+        """Extracts raw ranking prediction signals for multi-candidate re-ranking."""
+        # Keep feature dtypes consistent during inference.
+        for col in cat_features:
+            if col in X.columns:
+                X[col] = X[col].astype("category")
+                
         pool = Pool(data=X, cat_features=cat_features)
-        return self.model.predict_proba(pool)[:, 1]
+        
+        # CatBoostRanker returns raw relevance scores through predict,
+        # rather than class probabilities through predict_proba.
+        return self.model.predict(pool)

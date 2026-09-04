@@ -22,7 +22,7 @@ def test_psi_seasonal_shift():
     fe = FeatureEngineer()
     # Emulating a stable ref and a shifted tar (seasonal peak)
     ref = np.random.beta(2, 5, 1000) 
-    tar = np.random.beta(5, 2, 1000) # Сдвиг
+    tar = np.random.beta(5, 2, 1000)  # Shifted distribution.
     psi = fe.calculate_psi(ref, tar, bins=10)
     
     # We know from EDA that the actual drift here is around 0.15 - 0.20

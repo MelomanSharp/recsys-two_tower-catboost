@@ -1,5 +1,6 @@
 from src.pipeline.recommendation_pipeline import RecSysPipeline
 import subprocess
+import os
 
 def main():
     print("Starting Full Pipeline Training...")
@@ -13,7 +14,8 @@ def main():
     
     print("\nRunning Latency Benchmark...")
     # Launch existing benchmark-scritp
-    subprocess.run(["python", "scripts/benchmark_latency.py"])
+    subprocess.run(
+    ["python", "-m", "scripts.benchmark_latency"], cwd=os.path.dirname(os.path.dirname(__file__)))
 
 if __name__ == "__main__":
     main()

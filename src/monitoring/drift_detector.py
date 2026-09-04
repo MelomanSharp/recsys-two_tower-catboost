@@ -19,7 +19,7 @@ class DriftDetector:
     THRESHOLDS = {
         "price": 0.15,  
         "item_trendiness": 0.20, 
-        "department_name": 0.25, # Категорийный дрейф
+        "department_name": 0.25,  # Categorical drift.
     }
 
     def __init__(self):
@@ -48,10 +48,7 @@ class DriftDetector:
         return reports
 
     def should_retrain(self, reports: Dict[str, DriftReport]) -> bool:
-        """
-        Decision policy: 
-        Если цена пробила 0.15 (сезонность) ИЛИ тренды/ассортимент улетели за 0.20.
-        """
+        """Trigger retraining for seasonal price drift or a catalog shift above 0.20."""
         if not reports:
             return False
         

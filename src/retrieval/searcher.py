@@ -7,6 +7,6 @@ class CandidateSearcher:
         self.item_encoder = item_encoder
 
     def get_candidates(self, user_embedding, top_k=Config.TOP_K_CANDIDATES):
-        """Возвращает список ID кандидатов для пользователя."""
+        """Return candidate item IDs for a user."""
         candidates = self.faiss_index.search_candidates(user_embedding, top_k=top_k)
         return candidates[0] if candidates else []

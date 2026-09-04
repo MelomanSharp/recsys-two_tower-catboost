@@ -14,57 +14,55 @@ REQUIRED_FILES = [
 
 def download_competition_data(competition_name: str, destination: Path) -> None:
     """
-    Скачивает файлы соревнования Kaggle через kagglehub и копирует их в destination.
+    Download Kaggle competition files through kagglehub and copy them to destination.
     """
     try:
         import kagglehub
     except ImportError:
-        raise RuntimeError(
-            "Библиотека kagglehub не установлена. Установите её: pip install kagglehub"
-        )
+        raise RuntimeError("The kagglehub package is not installed. Run: pip install kagglehub")
 
-    print(f"⏳ Загрузка данных для соревнования '{competition_name}'...")
+    print(f"⏳ Downloading data for competition '{competition_name}'...")
     try:
-        # kagglehub.competition_download возвращает путь к папке с файлами (уже распакованными)
+        # competition_download returns a path to the extracted files.
         downloaded_path = kagglehub.competition_download(competition_name)
     except Exception as e:
-        raise RuntimeError(f"Ошибка загрузки через kagglehub: {e}")
+        raise RuntimeError(f"kagglehub download failed: {e}")
 
-    # Создаём директорию назначения, если её нет
+    # Create the destination directory if needed.
     destination.mkdir(parents=True, exist_ok=True)
 
-    # Копируем все файлы из временной папки в destination
+    # Copy all files from the temporary directory to destination.
     for file_name in os.listdir(downloaded_path):
         src = os.path.join(downloaded_path, file_name)
         dst = destination / file_name
-        shutil.copy2(src, dst)  # copy2 сохраняет метаданные
-        print(f"   Скопирован {file_name}")
+        shutil.copy2(src, dst)  # copy2 preserves metadata.
+        print(f"   Copied {file_name}")
 
-    print(f"✅ Все файлы скопированы в {destination}")
+    print(f"✅ All files copied to {destination}")
 
 
 def main():
-    # Если все необходимые файлы уже есть — выходим
+    # Exit when all required files are already present.
     if all((RAW_DATA_DIR / f).exists() for f in REQUIRED_FILES):
-        print("✅ Все CSV уже скачаны в data/raw/. Пропускаем загрузку.")
+        print("✅ All CSV files already exist in data/raw/. Skipping download.")
         return
 
-    # Иначе — качаем через Kaggle API
+    # Otherwise, download through the Kaggle API.
     competition = "h-and-m-personalized-fashion-recommendations"
     try:
         download_competition_data(competition, RAW_DATA_DIR)
     except Exception as e:
-        print(f"❌ Не удалось загрузить данные: {e}")
-        print("Убедитесь, что у вас есть доступ к интернету и настроены учетные данные Kaggle.")
-        print("Инструкция по настройке: https://www.kaggle.com/docs/api#authentication")
+        print(f"❌ Data download failed: {e}")
+        print("Make sure you have internet access and configured Kaggle credentials.")
+        print("Setup instructions: https://www.kaggle.com/docs/api#authentication")
         raise
 
-    # Проверяем, что все файлы действительно появились
+    # Verify that all files were downloaded.
     missing = [f for f in REQUIRED_FILES if not (RAW_DATA_DIR / f).exists()]
     if missing:
-        print(f"⚠️ После загрузки не найдены файлы: {missing}")
+        print(f"⚠️ Files missing after download: {missing}")
     else:
-        print("✅ Загрузка завершена успешно.")
+        print("✅ Download completed successfully.")
 
 
 if __name__ == "__main__":
